@@ -1,0 +1,8 @@
+FROM araiv4/runpod-worker-comfy:wan
+
+# Add your changes here
+# For example:
+# RUN pip install some-package
+# or
+# COPY new-file.txt /destination/
+

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     wget \
+    ffmpeg \
     libgl1 \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip
@@ -35,6 +36,13 @@ WORKDIR /comfyui
 # Install runpod
 RUN pip install runpod requests
 
+# Runtime libs needed by ComfyUI-VideoHelperSuite
+RUN pip install --no-cache-dir --force-reinstall \
+    opencv-python==4.8.0.76 \
+    imageio==2.34.0 \
+    imageio-ffmpeg==0.4.8 \
+    av==14.3.0
+
 # Support for the network volume
 ADD src/extra_model_paths.yaml ./
 
@@ -51,52 +59,26 @@ ADD *snapshot*.json /
 # Restore the snapshot to install custom nodes
 RUN /restore_snapshot.sh
 
-# Start container
+# Note: If the base image is used directly, this CMD will take effect
+# But for the final stage below, this will be overridden
 CMD ["/start.sh"]
 
-# Stage 2: Download models
-FROM base as downloader
-
-ARG MODEL_TYPE
+# Final stage
+FROM base as final
 
 # Change working directory to ComfyUI
 WORKDIR /comfyui
 
-# Create necessary directories
-RUN mkdir -p models/checkpoints models/vae models/text_encoders models/diffusion_models models/upscale_models
+# Create necessary directories if they don't exist
+RUN mkdir -p models/checkpoints models/vae models/unet models/clip models/text_encoders \
+    models/diffusion_models models/clip_vision models/upscale_models
 
-# Download checkpoints/vae/LoRA to include in image based on model type
-RUN if [ "$MODEL_TYPE" = "sdxl" ]; then \
-      wget -O models/checkpoints/sd_xl_base_1.0.safetensors https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors && \
-      wget -O models/vae/sdxl_vae.safetensors https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors && \
-      wget -O models/vae/sdxl-vae-fp16-fix.safetensors https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors; \
-    elif [ "$MODEL_TYPE" = "sd3" ]; then \
-      wget --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/checkpoints/sd3_medium_incl_clips_t5xxlfp8.safetensors https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors; \
-    elif [ "$MODEL_TYPE" = "flux1-schnell" ]; then \
-      wget -O models/unet/flux1-schnell.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors && \
-      wget -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors; \
-    elif [ "$MODEL_TYPE" = "flux1-dev" ]; then \
-      wget --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/unet/flux1-dev.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors && \
-      wget -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors; \
-    elif [ "$MODEL_TYPE" = "testModel" ]; then \
-      wget --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/checkpoints/flux1-dev-fp8.safetensors https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors; \
-    elif [ "$MODEL_TYPE" = "wan" ]; then \
-      wget -O models/vae/wan_2.1_vae.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors && \
-      wget -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors && \
-      wget -O models/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors && \
-      wget -O models/clip_vision/clip_vision_h.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors && \
-      wget -O models/upscale_models/OmniSR_X2_DIV2K.safetensors https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X2_DIV2K.safetensors; \
-    fi
+# Copy locally downloaded models
+COPY models/ models/
 
-# Stage 3: Final image
-FROM base as final
+# Go back to the root
+WORKDIR /
 
-# Copy models from stage 2 to the final image
-COPY --from=downloader /comfyui/models /comfyui/models
-
-# Start container
+# Start container - this is the CMD that will be used for the final image
+# This is essential for RunPod Serverless to properly start the container
 CMD ["/start.sh"]
