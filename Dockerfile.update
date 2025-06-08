@@ -1,0 +1,39 @@
+# Start from the no-models base image
+FROM araiv4/runpod-worker-comfy:no-models-updated
+
+# PyTorch and temp directory environment variables to prevent temp directory errors
+ENV TMPDIR=/comfyui/temp
+ENV TEMP=/comfyui/temp
+ENV TMP=/comfyui/temp
+ENV PYTORCH_JIT_USE_NNC_NOT_NVFUSER=1
+ENV TORCH_COMPILE_DEBUG=0
+ENV PYTORCH_DISABLE_PER_OP_PROFILING=1
+ENV TORCH_USE_CUDA_DSA=0
+ENV TORCH_DISABLE_NUMA=1
+ENV PYTHONWARNINGS=ignore
+
+# Create dedicated temp directory for ComfyUI with proper permissions
+RUN mkdir -p /comfyui/temp && chmod 755 /comfyui/temp
+
+# Create and configure system temporary directories
+RUN mkdir -p /tmp /var/tmp /usr/tmp && \
+    chmod 1777 /tmp /var/tmp /usr/tmp
+
+# Copy the PyTorch environment setup script
+COPY src/setup_pytorch_env.py /setup_pytorch_env.py
+RUN chmod +x /setup_pytorch_env.py
+
+# Copy the runtime model download script
+COPY src/download_models.sh /download_models.sh
+RUN chmod +x /download_models.sh
+
+# Copy updated start script with model downloading capability
+COPY src/start.sh /start.sh
+RUN chmod +x /start.sh
+
+# Environment variables for runtime model downloading
+# These will be set by RunPod serverless environment
+ENV MODEL_TYPE=""
+ENV HUGGINGFACE_ACCESS_TOKEN=""
+
+# The container will now download models at runtime based on MODEL_TYPE environment variable

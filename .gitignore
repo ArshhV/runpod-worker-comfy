@@ -5,3 +5,7 @@ data
 models
 simulated_uploaded
 __pycache__
+*.png
+*.jpg
+*.jpeg
+logs*.txt

@@ -9,6 +9,13 @@ This document outlines the environment variables available for configuring the `
 | `REFRESH_WORKER`     | When `true`, the worker pod will stop after each completed job to ensure a clean state for the next job. See the [RunPod documentation](https://docs.runpod.io/docs/handler-additional-controls#refresh-worker) for details. | `false` |
 | `SERVE_API_LOCALLY`  | When `true`, enables a local HTTP server simulating the RunPod environment for development and testing. See the [Development Guide](development.md#local-api) for more details.                                              | `false` |
 
+## Model Configuration
+
+| Environment Variable      | Description                                                                                                                                                                                                                    | Default |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| `MODEL_TYPE`             | Specifies which model to download at runtime. Options: `sdxl`, `sd3`, `flux1-schnell`, `flux1-dev`, `flux1-dev-fp8`, `wan`. See [Runtime Model Downloading](runtime-model-downloading.md) for details.                      | `wan`   |
+| `HUGGINGFACE_ACCESS_TOKEN` | **Runtime-only** HuggingFace access token for gated models (sd3, flux1-schnell, flux1-dev, wan). Required for certain models. **Never include in Docker image - set only in RunPod environment variables or local .env**. | None    |
+
 ## Logging Configuration
 
 | Environment Variable | Description                                                                                                                                                      | Default |
