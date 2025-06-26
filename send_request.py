@@ -12,8 +12,8 @@ from pathlib import Path
 
 # Configuration
 # https://vinvideo-comfyui-outputs.s3-ap-southeast-2.amazonaws.com
-API_KEY = os.getenv("RUNPOD_API_KEY", "your_runpod_api_key_here")
-ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID", "your_endpoint_id_here")
+API_KEY = os.getenv("RUNPOD_API_KEY", "")
+ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID", "")
 BASE_URL = f"https://api.runpod.ai/v2/{ENDPOINT_ID}"
 
 # Headers for API requests
@@ -172,6 +172,79 @@ def extract_images(response):
     else:
         print("ℹ️  No images found in response")
 
+def normalize_workflow_node_ids(workflow):
+    """
+    Normalize workflow node IDs to ensure consistent caching between requests.
+    This matches the server-side normalization and helps prevent model reloading.
+    """
+    import copy
+    
+    # Create a deep copy to avoid modifying the original
+    normalized_workflow = copy.deepcopy(workflow)
+    
+    # Define standard node ID mappings for common node types
+    # These should match the server-side mappings in handler.py
+    standard_node_mapping = {
+        "LoadDiffusionModelShared //Inspire": "model_loader_1",
+        "CLIPLoader": "clip_loader_1", 
+        "VAELoader": "vae_loader_1",
+        "CLIPVisionLoader": "clip_vision_loader_1",
+        "WanImageToVideo": "wan_i2v_1",
+        "LoadImage": "load_image_1",
+        "CLIPVisionEncode": "clip_vision_encode_1",
+        "ModelSamplingSD3": "model_sampling_1",
+        "KSampler": "ksampler_1",
+        "VAEDecode": "vae_decode_1",
+        "CLIPTextEncode": "clip_text_encode",
+        "SaveAnimatedWEBP": "save_webp_1"
+    }
+    
+    # Create mapping from old node IDs to new standardized IDs
+    old_to_new_id = {}
+    node_type_counters = {}
+    
+    # First pass: create the mapping
+    for old_id, node_data in workflow.items():
+        class_type = node_data.get("class_type", "")
+        
+        # Check if we have a standard mapping for this node type
+        if class_type in standard_node_mapping:
+            new_id = standard_node_mapping[class_type]
+        else:
+            # For other node types, use a counter-based approach
+            if class_type not in node_type_counters:
+                node_type_counters[class_type] = 1
+            else:
+                node_type_counters[class_type] += 1
+            
+            # Create a standardized ID based on class type
+            counter = node_type_counters[class_type]
+            new_id = f"{class_type.lower().replace(' ', '_')}_{counter}"
+        
+        old_to_new_id[old_id] = new_id
+    
+    # Second pass: rebuild workflow with new IDs and update references
+    new_workflow = {}
+    for old_id, node_data in workflow.items():
+        new_id = old_to_new_id[old_id]
+        new_node_data = copy.deepcopy(node_data)
+        
+        # Update input references to use new node IDs
+        if "inputs" in new_node_data:
+            for input_key, input_value in new_node_data["inputs"].items():
+                if isinstance(input_value, list) and len(input_value) == 2:
+                    # This looks like a node reference [node_id, output_index]
+                    referenced_old_id = str(input_value[0])
+                    if referenced_old_id in old_to_new_id:
+                        new_node_data["inputs"][input_key] = [
+                            old_to_new_id[referenced_old_id], 
+                            input_value[1]
+                        ]
+        
+        new_workflow[new_id] = new_node_data
+    
+    return new_workflow
+
 def main():
     """Main function."""
     print("=" * 60)
@@ -187,8 +260,17 @@ def main():
     print(f"✅ Loaded image-to-video workflow")
     print(f"📊 Workflow has {len(workflow)} nodes")
     
+    # Normalize workflow for consistent model caching
+    print("🔄 Normalizing workflow node IDs for better model caching...")
+    workflow = normalize_workflow_node_ids(workflow)
+    print(f"✅ Workflow normalized with consistent node IDs")
+    
+    # Normalize workflow node IDs
+    workflow = normalize_workflow_node_ids(workflow)
+    print("✅ Normalized workflow node IDs")
+    
     # Check if input image exists
-    image_path = Path(__file__).parent / "test_resources" / "images" / "ComfyUI_00001_.png"
+    image_path = Path(__file__).parent / "test_resources" / "images" / "flux_dev_example.png"
     if image_path.exists():
         print(f"✅ Input image found: {image_path}")
         
@@ -208,7 +290,7 @@ def main():
     input_images = []
     if base64_image:
         input_images.append({
-            "name": "ComfyUI_00001_.png",
+            "name": "flux_dev_example.png",
             "image": base64_image
         })
     

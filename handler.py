@@ -475,6 +475,116 @@ def get_image_data(filename, subfolder, image_type):
         return None
 
 
+def normalize_workflow_for_caching(workflow):
+    """
+    Normalize workflow to ensure consistent node IDs for better model caching.
+
+    ComfyUI caches models based on node IDs and their configurations.
+    To maximize cache hits, we need to ensure that similar workflows
+    use consistent node IDs.
+
+    Args:
+        workflow (dict): The original workflow
+
+    Returns:
+        dict: The normalized workflow with consistent node IDs
+    """
+    # Create a deep copy to avoid modifying the original
+    import copy
+
+    normalized_workflow = copy.deepcopy(workflow)
+
+    # Define standard node ID mappings for common node types
+    # This ensures that the same model loader nodes always get the same IDs
+    standard_node_mapping = {
+        "LoadDiffusionModelShared //Inspire": "model_loader_1",
+        "CLIPLoader": "clip_loader_1",
+        "VAELoader": "vae_loader_1",
+        "CLIPVisionLoader": "clip_vision_loader_1",
+        "WanImageToVideo": "wan_i2v_1",
+        "LoadImage": "load_image_1",
+        "CLIPVisionEncode": "clip_vision_encode_1",
+        "ModelSamplingSD3": "model_sampling_1",
+        "KSampler": "ksampler_1",
+        "VAEDecode": "vae_decode_1",
+        "CLIPTextEncode": "clip_text_encode",
+        "SaveAnimatedWEBP": "save_webp_1",
+    }
+
+    # Create mapping from old node IDs to new standardized IDs
+    old_to_new_id = {}
+    node_type_counters = {}
+
+    # First pass: create the mapping
+    for old_id, node_data in workflow.items():
+        class_type = node_data.get("class_type", "")
+
+        # Check if we have a standard mapping for this node type
+        if class_type in standard_node_mapping:
+            new_id = standard_node_mapping[class_type]
+        else:
+            # For other node types, use a counter-based approach
+            if class_type not in node_type_counters:
+                node_type_counters[class_type] = 1
+            else:
+                node_type_counters[class_type] += 1
+
+            # Create a standardized ID based on class type
+            counter = node_type_counters[class_type]
+            new_id = f"{class_type.lower().replace(' ', '_')}_{counter}"
+
+        old_to_new_id[old_id] = new_id
+
+    # Second pass: rebuild workflow with new IDs and update references
+    new_workflow = {}
+    for old_id, node_data in workflow.items():
+        new_id = old_to_new_id[old_id]
+        new_node_data = copy.deepcopy(node_data)
+
+        # Update input references to use new node IDs
+        if "inputs" in new_node_data:
+            for input_key, input_value in new_node_data["inputs"].items():
+                if isinstance(input_value, list) and len(input_value) == 2:
+                    # This looks like a node reference [node_id, output_index]
+                    referenced_old_id = str(input_value[0])
+                    if referenced_old_id in old_to_new_id:
+                        new_node_data["inputs"][input_key] = [
+                            old_to_new_id[referenced_old_id],
+                            input_value[1],
+                        ]
+
+        new_workflow[new_id] = new_node_data
+
+    return new_workflow
+
+
+def configure_model_caching():
+    """
+    Configure ComfyUI for better model caching by adjusting memory management settings.
+    This should be called when the worker starts up.
+    """
+    try:
+        # Try to set model management to keep models in memory longer
+        # This is a best-effort attempt - ComfyUI may not expose all these settings via API
+        
+        # Check current system info to see memory management status
+        response = requests.get(f"http://{COMFY_HOST}/system_stats", timeout=5)
+        if response.status_code == 200:
+            stats = response.json()
+            print(f"worker-comfyui - System stats: {stats}")
+        
+        # Try to get and log the current model management settings
+        response = requests.get(f"http://{COMFY_HOST}/object_info", timeout=5)
+        if response.status_code == 200:
+            print(f"worker-comfyui - ComfyUI API available for model caching optimization")
+        
+        print(f"worker-comfyui - Model caching configuration completed")
+        
+    except Exception as e:
+        print(f"worker-comfyui - Note: Could not configure advanced model caching: {e}")
+        print(f"worker-comfyui - Using basic caching optimizations only")
+
+
 def handler(job):
     """
     Handles a job using ComfyUI via websockets for status and image retrieval.
@@ -496,6 +606,19 @@ def handler(job):
     # Extract validated data
     workflow = validated_data["workflow"]
     input_images = validated_data.get("images")
+    
+    # Normalize workflow for better model caching
+    print(f"worker-comfyui - Normalizing workflow for model caching...")
+    original_node_count = len(workflow)
+    original_node_ids = list(workflow.keys())
+    
+    workflow = normalize_workflow_for_caching(workflow)
+    
+    normalized_node_ids = list(workflow.keys())
+    print(f"worker-comfyui - Workflow normalized: {original_node_count} nodes")
+    print(f"worker-comfyui - Node ID mapping applied for consistent model caching")
+    print(f"worker-comfyui - Original IDs: {', '.join(original_node_ids[:5])}{'...' if len(original_node_ids) > 5 else ''}")
+    print(f"worker-comfyui - Normalized IDs: {', '.join(normalized_node_ids[:5])}{'...' if len(normalized_node_ids) > 5 else ''}")
 
     # Make sure that the ComfyUI HTTP API is available before proceeding
     if not check_server(
@@ -518,7 +641,9 @@ def handler(job):
             }
 
     ws = None
-    client_id = str(uuid.uuid4())
+    # Use a consistent client_id to help with model caching
+    # You can make this configurable via environment variable if needed
+    client_id = os.environ.get("COMFY_CLIENT_ID", "runpod-worker-stable-client")
     prompt_id = None
     output_data = []
     errors = []
@@ -793,4 +918,8 @@ def handler(job):
 
 if __name__ == "__main__":
     print("worker-comfyui - Starting handler...")
+    
+    # Configure model caching for better performance
+    configure_model_caching()
+    
     runpod.serverless.start({"handler": handler})

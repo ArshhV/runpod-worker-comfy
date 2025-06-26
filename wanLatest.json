@@ -31,7 +31,7 @@
   },
   "6": {
     "inputs": {
-      "text": "3 bottles rotating around their axis",
+      "text": "anime lady rotating around in her room",
       "clip": [
         "38",
         0
@@ -168,7 +168,7 @@
   },
   "52": {
     "inputs": {
-      "image": "ComfyUI_00001_.png"
+      "image": "flux_dev_example.png"
     },
     "class_type": "LoadImage",
     "_meta": {

@@ -38,10 +38,31 @@ comfy-manager-set-mode offline || echo "worker-comfyui - Could not set ComfyUI-M
 # Download models at runtime if MODEL_TYPE is set
 if [ -n "$MODEL_TYPE" ]; then
     echo "worker-comfyui: MODEL_TYPE detected: $MODEL_TYPE"
+    echo "worker-comfyui: Checking HuggingFace token availability..."
+    if [ -n "$HUGGINGFACE_ACCESS_TOKEN" ]; then
+        echo "worker-comfyui: HuggingFace token is set (length: ${#HUGGINGFACE_ACCESS_TOKEN} chars)"
+    else
+        echo "worker-comfyui: WARNING - HUGGINGFACE_ACCESS_TOKEN is not set"
+    fi
+    
+    echo "worker-comfyui: Checking disk space before model download..."
+    df -h /comfyui/models 2>/dev/null || df -h /
+    
     if [ -f "/download_models.sh" ]; then
         echo "worker-comfyui: Running model download script"
         chmod +x /download_models.sh
+        echo "worker-comfyui: =========================================="
+        echo "worker-comfyui: Starting model download process..."
+        echo "worker-comfyui: Time: $(date)"
+        echo "worker-comfyui: =========================================="
         /download_models.sh
+        echo "worker-comfyui: =========================================="
+        echo "worker-comfyui: Model download process completed"
+        echo "worker-comfyui: Time: $(date)"
+        echo "worker-comfyui: =========================================="
+        
+        echo "worker-comfyui: Checking downloaded models..."
+        find /comfyui/models -name "*.safetensors" -exec ls -lh {} \; 2>/dev/null | head -10
     else
         echo "worker-comfyui: Warning - download_models.sh not found"
     fi
@@ -67,12 +88,12 @@ fi
 
 # Serve the API and don't shutdown the container
 if [ "$SERVE_API_LOCALLY" == "true" ]; then
-    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --listen --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
+    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --listen --verbose "${COMFY_LOG_LEVEL}" --log-stdout --highvram &
 
     echo "worker-comfyui: Starting RunPod Handler"
     python -u /handler.py --rp_serve_api --rp_api_host=0.0.0.0
 else
-    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --verbose "${COMFY_LOG_LEVEL}" --log-stdout &
+    python -u /comfyui/main.py --disable-auto-launch --disable-metadata --verbose "${COMFY_LOG_LEVEL}" --log-stdout --highvram &
 
     echo "worker-comfyui: Starting RunPod Handler"
     python -u /handler.py

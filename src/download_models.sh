@@ -18,75 +18,168 @@ echo "worker-comfyui: Starting model download for type: $MODEL_TYPE"
 # Create directory structure if it doesn't exist
 mkdir -p /comfyui/models/checkpoints /comfyui/models/vae /comfyui/models/unet /comfyui/models/clip /comfyui/models/text_encoders /comfyui/models/diffusion_models /comfyui/models/clip_vision /comfyui/models/upscale_models
 
-# Helper function to download with authentication
+# Helper function to check if file exists and skip download
+check_and_download_with_auth() {
+    local token="$1"
+    local output="$2"
+    local url="$3"
+    local filename=$(basename "$output")
+    
+    if [ -f "$output" ]; then
+        local file_size=$(ls -lh "$output" | awk '{print $5}')
+        echo "worker-comfyui: File $filename already exists (size: $file_size), skipping download"
+        return 0
+    fi
+    
+    download_with_auth "$token" "$output" "$url"
+}
+
+# Helper function to check if file exists and skip download (no auth)
+check_and_download_without_auth() {
+    local output="$1"
+    local url="$2"
+    local filename=$(basename "$output")
+    
+    if [ -f "$output" ]; then
+        local file_size=$(ls -lh "$output" | awk '{print $5}')
+        echo "worker-comfyui: File $filename already exists (size: $file_size), skipping download"
+        return 0
+    fi
+    
+    download_without_auth "$output" "$url"
+}
+
+# Helper function to download with authentication and progress
 download_with_auth() {
     local token="$1"
     local output="$2"
     local url="$3"
+    local filename=$(basename "$output")
+    
+    echo "worker-comfyui: Starting download of $filename..."
+    echo "worker-comfyui: URL: $url"
+    echo "worker-comfyui: Destination: $output"
     
     if [ -n "$token" ]; then
-        wget -q --header="Authorization: Bearer $token" -O "$output" "$url"
+        # Use wget with progress bar, unbuffered output for real-time progress
+        wget --progress=bar:force:noscroll --header="Authorization: Bearer $token" -O "$output" "$url" 2>&1 | \
+        stdbuf -oL -eL sed 's/^/worker-comfyui: DOWNLOAD PROGRESS: /' &
+        
+        # Wait for the wget process to complete
+        wait $!
+        local exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            local file_size=$(ls -lh "$output" | awk '{print $5}')
+            echo "worker-comfyui: Successfully downloaded $filename (size: $file_size)"
+        else
+            echo "worker-comfyui: ERROR - Failed to download $filename"
+            exit 1
+        fi
     else
-        echo "Error: HUGGINGFACE_ACCESS_TOKEN is required for $url"
+        echo "worker-comfyui: ERROR - HUGGINGFACE_ACCESS_TOKEN is required for $url"
         exit 1
     fi
 }
 
-# Helper function to download without authentication
+# Helper function to download without authentication and progress
 download_without_auth() {
     local output="$1"
     local url="$2"
-    wget -q -O "$output" "$url"
+    local filename=$(basename "$output")
+    
+    echo "worker-comfyui: Starting download of $filename..."
+    echo "worker-comfyui: URL: $url"
+    echo "worker-comfyui: Destination: $output"
+    
+    # Use wget with progress bar, unbuffered output for real-time progress
+    wget --progress=bar:force:noscroll -O "$output" "$url" 2>&1 | \
+    stdbuf -oL -eL sed 's/^/worker-comfyui: DOWNLOAD PROGRESS: /' &
+    
+    # Wait for the wget process to complete
+    wait $!
+    local exit_code=$?
+    
+    if [ $exit_code -eq 0 ]; then
+        local file_size=$(ls -lh "$output" | awk '{print $5}')
+        echo "worker-comfyui: Successfully downloaded $filename (size: $file_size)"
+    else
+        echo "worker-comfyui: ERROR - Failed to download $filename"
+        exit 1
+    fi
 }
 
-# Download models based on type
 case "$MODEL_TYPE" in
     "sdxl")
-        echo "Downloading SDXL models..."
-        download_without_auth "/comfyui/models/checkpoints/sd_xl_base_1.0.safetensors" "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
-        download_without_auth "/comfyui/models/vae/sdxl_vae.safetensors" "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors"
-        download_without_auth "/comfyui/models/vae/sdxl-vae-fp16-fix.safetensors" "https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors"
-        echo "SDXL models downloaded successfully."
+        echo "worker-comfyui: Downloading SDXL models..."
+        check_and_download_without_auth "/comfyui/models/checkpoints/sd_xl_base_1.0.safetensors" "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+        check_and_download_without_auth "/comfyui/models/vae/sdxl_vae.safetensors" "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors"
+        check_and_download_without_auth "/comfyui/models/vae/sdxl-vae-fp16-fix.safetensors" "https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors"
+        echo "worker-comfyui: SDXL models downloaded successfully."
         ;;
         
     "sd3")
-        echo "Downloading SD3 models..."
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/checkpoints/sd3_medium_incl_clips_t5xxlfp8.safetensors" "https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors"
-        echo "SD3 models downloaded successfully."
+        echo "worker-comfyui: Downloading SD3 models..."
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/checkpoints/sd3_medium_incl_clips_t5xxlfp8.safetensors" "https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors"
+        echo "worker-comfyui: SD3 models downloaded successfully."
         ;;
         
     "flux1-schnell")
-        echo "Downloading FLUX.1-schnell models..."
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/unet/flux1-schnell.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors"
-        download_without_auth "/comfyui/models/clip/clip_l.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
-        download_without_auth "/comfyui/models/clip/t5xxl_fp8_e4m3fn.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
-        echo "FLUX.1-schnell models downloaded successfully."
+        echo "worker-comfyui: Downloading FLUX.1-schnell models..."
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/unet/flux1-schnell.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors"
+        check_and_download_without_auth "/comfyui/models/clip/clip_l.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
+        check_and_download_without_auth "/comfyui/models/clip/t5xxl_fp8_e4m3fn.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
+        echo "worker-comfyui: FLUX.1-schnell models downloaded successfully."
         ;;
         
     "flux1-dev")
-        echo "Downloading FLUX.1-dev models..."
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/unet/flux1-dev.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors"
-        download_without_auth "/comfyui/models/clip/clip_l.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
-        download_without_auth "/comfyui/models/clip/t5xxl_fp8_e4m3fn.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors"
-        echo "FLUX.1-dev models downloaded successfully."
+        echo "worker-comfyui: Downloading FLUX.1-dev models..."
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/unet/flux1-dev.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors"
+        check_and_download_without_auth "/comfyui/models/clip/clip_l.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
+        check_and_download_without_auth "/comfyui/models/clip/t5xxl_fp8_e4m3fn.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors"
+        echo "worker-comfyui: FLUX.1-dev models downloaded successfully."
         ;;
         
     "flux1-dev-fp8")
-        echo "Downloading FLUX.1-dev-fp8 models..."
-        download_without_auth "/comfyui/models/checkpoints/flux1-dev-fp8.safetensors" "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors"
-        echo "FLUX.1-dev-fp8 models downloaded successfully."
+        echo "worker-comfyui: Downloading FLUX.1-dev-fp8 models..."
+        check_and_download_without_auth "/comfyui/models/checkpoints/flux1-dev-fp8.safetensors" "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors"
+        echo "worker-comfyui: FLUX.1-dev-fp8 models downloaded successfully."
         ;;
         
     "wan")
-        echo "Downloading WAN models..."
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/wan_2.1_vae.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors"
-        download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/clip_vision/clip_vision_h.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors"
-        download_without_auth "/comfyui/models/upscale_models/OmniSR_X2_DIV2K.safetensors" "https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X2_DIV2K.safetensors"
-        echo "WAN models downloaded successfully."
+        echo "worker-comfyui: ========================================"
+        echo "worker-comfyui: Starting WAN model downloads..."
+        echo "worker-comfyui: This may take several minutes for large models"
+        echo "worker-comfyui: ========================================"
+        
+        # List all models that will be downloaded
+        echo "worker-comfyui: Models to download:"
+        echo "worker-comfyui:   1. wan_2.1_vae.safetensors"
+        echo "worker-comfyui:   2. umt5_xxl_fp8_e4m3fn_scaled.safetensors" 
+        echo "worker-comfyui:   3. wan2.1_i2v_720p_14B_bf16.safetensors (LARGE ~27GB)"
+        echo "worker-comfyui:   4. clip_vision_h.safetensors"
+        echo "worker-comfyui:   5. OmniSR_X2_DIV2K.safetensors"
+        echo "worker-comfyui: ========================================"
+        
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/wan_2.1_vae.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
+        
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+        
+        echo "worker-comfyui: ========================================"
+        echo "worker-comfyui: WARNING: Downloading large model file (~27GB)"
+        echo "worker-comfyui: This will take significant time depending on connection"
+        echo "worker-comfyui: ========================================"
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_720p_14B_bf16.safetensors"
+        
+        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/clip_vision/clip_vision_h.safetensors" "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors"
+        
+        check_and_download_without_auth "/comfyui/models/upscale_models/OmniSR_X2_DIV2K.safetensors" "https://huggingface.co/Acly/Omni-SR/resolve/main/OmniSR_X2_DIV2K.safetensors"
+        
+        echo "worker-comfyui: ========================================"
+        echo "worker-comfyui: WAN models downloaded successfully!"
+        echo "worker-comfyui: ========================================"
         ;;
         
     *)

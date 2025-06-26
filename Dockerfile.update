@@ -23,17 +23,35 @@ RUN mkdir -p /tmp /var/tmp /usr/tmp && \
 COPY src/setup_pytorch_env.py /setup_pytorch_env.py
 RUN chmod +x /setup_pytorch_env.py
 
-# Copy the runtime model download script
+# Copy the runtime model download script with enhanced progress logging
 COPY src/download_models.sh /download_models.sh
 RUN chmod +x /download_models.sh
 
-# Copy updated start script with model downloading capability
+# Copy updated start script with enhanced model downloading and logging
 COPY src/start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Environment variables for runtime model downloading
+# Copy the updated handler with model caching optimizations
+COPY handler.py /handler.py
+
+# ============================================================================
+# MODEL CACHING OPTIMIZATION CONFIGURATION
+# ============================================================================
+# These environment variables optimize ComfyUI model caching to prevent
+# model reloading on each request, significantly improving performance.
+# Based on: https://github.com/comfyanonymous/ComfyUI/discussions/3103
+
+# Model caching optimization environment variables
+ENV COMFY_CLIENT_ID="runpod-worker-stable-client"
+ENV REFRESH_WORKER="false"
+
+# Enhanced logging for model downloads and ComfyUI operations
+ENV COMFY_LOG_LEVEL="DEBUG"
+
+# Environment variables for runtime model downloading with progress tracking
 # These will be set by RunPod serverless environment
 ENV MODEL_TYPE=""
 ENV HUGGINGFACE_ACCESS_TOKEN=""
 
 # The container will now download models at runtime based on MODEL_TYPE environment variable
+# with detailed progress logging including download speeds, progress bars, and file sizes
