@@ -15,8 +15,40 @@ fi
 
 echo "worker-comfyui: Starting model download for type: $MODEL_TYPE"
 
+# Function to check overall model status
+check_model_status() {
+    local model_type="$1"
+    echo "worker-comfyui: ========================================"
+    echo "worker-comfyui: Checking existing models for $model_type..."
+    echo "worker-comfyui: ========================================"
+    
+    # Check if models directory is mounted (network volume)
+    if mountpoint -q /comfyui/models 2>/dev/null; then
+        echo "worker-comfyui: ✓ Models directory is mounted as network volume"
+    elif [ -d /comfyui/models ]; then
+        echo "worker-comfyui: ✓ Models directory exists (local storage)"
+    else
+        echo "worker-comfyui: Models directory not found, will create it"
+    fi
+    
+    # Show disk usage of models directory if it exists
+    if [ -d /comfyui/models ]; then
+        local models_size=$(du -sh /comfyui/models 2>/dev/null | cut -f1 || echo "unknown")
+        echo "worker-comfyui: Current models directory size: $models_size"
+        
+        # Count existing model files
+        local total_files=$(find /comfyui/models -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" 2>/dev/null | wc -l)
+        echo "worker-comfyui: Existing model files found: $total_files"
+    fi
+    
+    echo "worker-comfyui: ========================================"
+}
+
 # Create directory structure if it doesn't exist
 mkdir -p /comfyui/models/checkpoints /comfyui/models/vae /comfyui/models/unet /comfyui/models/clip /comfyui/models/text_encoders /comfyui/models/diffusion_models /comfyui/models/clip_vision /comfyui/models/upscale_models
+
+# Check model status before proceeding
+check_model_status "$MODEL_TYPE"
 
 # Helper function to check if file exists and skip download
 check_and_download_with_auth() {
@@ -25,10 +57,22 @@ check_and_download_with_auth() {
     local url="$3"
     local filename=$(basename "$output")
     
+    # Check if file exists and has reasonable size (> 1MB to avoid partial downloads)
     if [ -f "$output" ]; then
-        local file_size=$(ls -lh "$output" | awk '{print $5}')
-        echo "worker-comfyui: File $filename already exists (size: $file_size), skipping download"
-        return 0
+        local file_size_bytes=$(stat -f%z "$output" 2>/dev/null || stat -c%s "$output" 2>/dev/null || echo "0")
+        local file_size_human=$(ls -lh "$output" | awk '{print $5}')
+        
+        # Check if file size is reasonable (> 1MB = 1048576 bytes)
+        if [ "$file_size_bytes" -gt 1048576 ]; then
+            echo "worker-comfyui: ✓ File $filename already exists and appears complete (size: $file_size_human)"
+            echo "worker-comfyui:   Path: $output"
+            return 0
+        else
+            echo "worker-comfyui: ⚠ File $filename exists but appears incomplete (size: $file_size_human), re-downloading..."
+            rm -f "$output"
+        fi
+    else
+        echo "worker-comfyui: File $filename not found, downloading..."
     fi
     
     download_with_auth "$token" "$output" "$url"
@@ -40,10 +84,22 @@ check_and_download_without_auth() {
     local url="$2"
     local filename=$(basename "$output")
     
+    # Check if file exists and has reasonable size (> 1MB to avoid partial downloads)
     if [ -f "$output" ]; then
-        local file_size=$(ls -lh "$output" | awk '{print $5}')
-        echo "worker-comfyui: File $filename already exists (size: $file_size), skipping download"
-        return 0
+        local file_size_bytes=$(stat -f%z "$output" 2>/dev/null || stat -c%s "$output" 2>/dev/null || echo "0")
+        local file_size_human=$(ls -lh "$output" | awk '{print $5}')
+        
+        # Check if file size is reasonable (> 1MB = 1048576 bytes)
+        if [ "$file_size_bytes" -gt 1048576 ]; then
+            echo "worker-comfyui: ✓ File $filename already exists and appears complete (size: $file_size_human)"
+            echo "worker-comfyui:   Path: $output"
+            return 0
+        else
+            echo "worker-comfyui: ⚠ File $filename exists but appears incomplete (size: $file_size_human), re-downloading..."
+            rm -f "$output"
+        fi
+    else
+        echo "worker-comfyui: File $filename not found, downloading..."
     fi
     
     download_without_auth "$output" "$url"
@@ -61,13 +117,37 @@ download_with_auth() {
     echo "worker-comfyui: Destination: $output"
     
     if [ -n "$token" ]; then
-        # Use wget with progress bar, unbuffered output for real-time progress
-        wget --progress=bar:force:noscroll --header="Authorization: Bearer $token" -O "$output" "$url" 2>&1 | \
-        stdbuf -oL -eL sed 's/^/worker-comfyui: DOWNLOAD PROGRESS: /' &
+        # Create a temporary file for wget output
+        local temp_log=$(mktemp)
         
-        # Wait for the wget process to complete
-        wait $!
+        # Use wget with progress bar and real-time output
+        wget --progress=bar:force:noscroll --header="Authorization: Bearer $token" -O "$output" "$url" 2>"$temp_log" &
+        local wget_pid=$!
+        
+        # Monitor the progress in real-time
+        (
+            while kill -0 "$wget_pid" 2>/dev/null; do
+                if [ -f "$temp_log" ]; then
+                    tail -f "$temp_log" 2>/dev/null | while IFS= read -r line; do
+                        if [[ "$line" =~ [0-9]+% ]]; then
+                            echo "worker-comfyui: DOWNLOAD PROGRESS: $line"
+                        fi
+                    done &
+                    local tail_pid=$!
+                    wait "$wget_pid" 2>/dev/null
+                    kill "$tail_pid" 2>/dev/null
+                    break
+                fi
+                sleep 0.1
+            done
+        ) &
+        
+        # Wait for wget to complete
+        wait "$wget_pid"
         local exit_code=$?
+        
+        # Clean up temp file
+        rm -f "$temp_log"
         
         if [ $exit_code -eq 0 ]; then
             local file_size=$(ls -lh "$output" | awk '{print $5}')
@@ -92,13 +172,37 @@ download_without_auth() {
     echo "worker-comfyui: URL: $url"
     echo "worker-comfyui: Destination: $output"
     
-    # Use wget with progress bar, unbuffered output for real-time progress
-    wget --progress=bar:force:noscroll -O "$output" "$url" 2>&1 | \
-    stdbuf -oL -eL sed 's/^/worker-comfyui: DOWNLOAD PROGRESS: /' &
+    # Create a temporary file for wget output
+    local temp_log=$(mktemp)
     
-    # Wait for the wget process to complete
-    wait $!
+    # Use wget with progress bar and real-time output
+    wget --progress=bar:force:noscroll -O "$output" "$url" 2>"$temp_log" &
+    local wget_pid=$!
+    
+    # Monitor the progress in real-time
+    (
+        while kill -0 "$wget_pid" 2>/dev/null; do
+            if [ -f "$temp_log" ]; then
+                tail -f "$temp_log" 2>/dev/null | while IFS= read -r line; do
+                    if [[ "$line" =~ [0-9]+% ]]; then
+                        echo "worker-comfyui: DOWNLOAD PROGRESS: $line"
+                    fi
+                done &
+                local tail_pid=$!
+                wait "$wget_pid" 2>/dev/null
+                kill "$tail_pid" 2>/dev/null
+                break
+            fi
+            sleep 0.1
+        done
+    ) &
+    
+    # Wait for wget to complete
+    wait "$wget_pid"
     local exit_code=$?
+    
+    # Clean up temp file
+    rm -f "$temp_log"
     
     if [ $exit_code -eq 0 ]; then
         local file_size=$(ls -lh "$output" | awk '{print $5}')
@@ -126,10 +230,10 @@ case "$MODEL_TYPE" in
         
     "flux1-schnell")
         echo "worker-comfyui: Downloading FLUX.1-schnell models..."
-        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/unet/flux1-schnell.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors"
+        check_and_download_without_auth "/comfyui/models/unet/flux1-schnell.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors"
         check_and_download_without_auth "/comfyui/models/clip/clip_l.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
         check_and_download_without_auth "/comfyui/models/clip/t5xxl_fp8_e4m3fn.safetensors" "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
-        check_and_download_with_auth "$HUGGINGFACE_ACCESS_TOKEN" "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
+        check_and_download_without_auth "/comfyui/models/vae/ae.safetensors" "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
         echo "worker-comfyui: FLUX.1-schnell models downloaded successfully."
         ;;
         
@@ -180,13 +284,22 @@ case "$MODEL_TYPE" in
         echo "worker-comfyui: ========================================"
         echo "worker-comfyui: WAN models downloaded successfully!"
         echo "worker-comfyui: ========================================"
-        ;;
-        
-    *)
+        ;;        *)
         echo "Unknown model type: $MODEL_TYPE"
         echo "Available model types: sdxl, sd3, flux1-schnell, flux1-dev, flux1-dev-fp8, wan"
         echo "Skipping model download."
         ;;
 esac
 
-echo "worker-comfyui: Model download completed for $MODEL_TYPE"
+# Final summary
+echo "worker-comfyui: ========================================"
+echo "worker-comfyui: Model download process completed for $MODEL_TYPE"
+
+if [ -d /comfyui/models ]; then
+    local final_size=$(du -sh /comfyui/models 2>/dev/null | cut -f1 || echo "unknown")
+    local total_files=$(find /comfyui/models -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" 2>/dev/null | wc -l)
+    echo "worker-comfyui: Final models directory size: $final_size"
+    echo "worker-comfyui: Total model files: $total_files"
+fi
+
+echo "worker-comfyui: ========================================"
