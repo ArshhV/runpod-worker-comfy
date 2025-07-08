@@ -86,6 +86,10 @@ if ! mkdir -p /comfyui/user 2>/dev/null; then
     export COMFY_LOG_LEVEL="ERROR"
 fi
 
+# Force high VRAM mode and disable memory optimization
+export COMFYUI_FORCE_HIGH_VRAM=1
+export COMFYUI_DISABLE_MEMORY_MANAGEMENT=1
+
 # Serve the API and don't shutdown the container
 if [ "$SERVE_API_LOCALLY" == "true" ]; then
     python -u /comfyui/main.py --disable-auto-launch --disable-metadata --listen --verbose "${COMFY_LOG_LEVEL}" --log-stdout --highvram &

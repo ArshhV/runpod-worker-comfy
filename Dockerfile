@@ -22,6 +22,10 @@ ENV PYTORCH_JIT_USE_NNC_NOT_NVFUSER=1
 ENV TORCH_COMPILE_DEBUG=0
 ENV PYTORCH_DISABLE_PER_OP_PROFILING=1
 
+# Force ComfyUI to use high VRAM mode
+ENV COMFYUI_FORCE_HIGH_VRAM=1
+ENV COMFYUI_DISABLE_MEMORY_MANAGEMENT=1
+
 # Install Python, git and other necessary tools
 RUN apt-get update && apt-get install -y \
     python3.12 \

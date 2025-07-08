@@ -13,6 +13,7 @@ import uuid
 import tempfile
 import socket
 import traceback
+import copy
 
 # Time to wait between API check attempts in milliseconds
 COMFY_API_AVAILABLE_INTERVAL_MS = 50
@@ -99,7 +100,8 @@ def _attempt_websocket_reconnect(ws_url, max_attempts, delay_s, initial_error):
         try:
             # Need to create a new socket object for reconnect
             new_ws = websocket.WebSocket()
-            new_ws.connect(ws_url, timeout=10)  # Use existing ws_url
+            new_ws.settimeout(30)  # Set the same timeout as main connection
+            new_ws.connect(ws_url, timeout=30)  # Use longer timeout for reconnection
             print(f"worker-comfyui - Websocket reconnected successfully.")
             return new_ws  # Return the new connected socket
         except (
@@ -475,6 +477,42 @@ def get_image_data(filename, subfolder, image_type):
         return None
 
 
+def get_video_data(filename, subfolder, file_type="output"):
+    """
+    Fetch video bytes from the ComfyUI /view endpoint.
+
+    Args:
+        filename (str): The filename of the video.
+        subfolder (str): The subfolder where the video is stored.
+        file_type (str): The type of the file (e.g., 'output').
+
+    Returns:
+        bytes: The raw video data, or None if an error occurs.
+    """
+    print(
+        f"worker-comfyui - Fetching video data: type={file_type}, subfolder={subfolder}, filename={filename}"
+    )
+    data = {"filename": filename, "subfolder": subfolder, "type": file_type}
+    url_values = urllib.parse.urlencode(data)
+    try:
+        # Use requests for consistency and timeout
+        response = requests.get(f"http://{COMFY_HOST}/view?{url_values}", timeout=120)
+        response.raise_for_status()
+        print(f"worker-comfyui - Successfully fetched video data for {filename}")
+        return response.content
+    except requests.Timeout:
+        print(f"worker-comfyui - Timeout fetching video data for {filename}")
+        return None
+    except requests.RequestException as e:
+        print(f"worker-comfyui - Error fetching video data for {filename}: {e}")
+        return None
+    except Exception as e:
+        print(
+            f"worker-comfyui - Unexpected error fetching video data for {filename}: {e}"
+        )
+        return None
+
+
 def normalize_workflow_for_caching(workflow):
     """
     Normalize workflow to ensure consistent node IDs for better model caching.
@@ -509,6 +547,7 @@ def normalize_workflow_for_caching(workflow):
         "VAEDecode": "vae_decode_1",
         "CLIPTextEncode": "clip_text_encode",
         "SaveAnimatedWEBP": "save_webp_1",
+        "VHS_VideoCombine": "vhs_videocombine_1",
     }
 
     # Create mapping from old node IDs to new standardized IDs
@@ -564,19 +603,33 @@ def configure_model_caching():
     This should be called when the worker starts up.
     """
     try:
-        # Try to set model management to keep models in memory longer
-        # This is a best-effort attempt - ComfyUI may not expose all these settings via API
-        
         # Check current system info to see memory management status
         response = requests.get(f"http://{COMFY_HOST}/system_stats", timeout=5)
         if response.status_code == 200:
             stats = response.json()
             print(f"worker-comfyui - System stats: {stats}")
+            
+            # Check VRAM status specifically
+            if 'vram' in stats:
+                vram_info = stats['vram']
+                total_vram = vram_info.get('total', 0)
+                free_vram = vram_info.get('free', 0)
+                used_vram = vram_info.get('used', 0)
+                print(f"worker-comfyui - VRAM Status: {used_vram/1024/1024/1024:.1f}GB used, {free_vram/1024/1024/1024:.1f}GB free, {total_vram/1024/1024/1024:.1f}GB total")
+                
+                # Warn if we're not in high VRAM mode with sufficient memory
+                if total_vram > 20 * 1024 * 1024 * 1024:  # More than 20GB
+                    print(f"worker-comfyui - High VRAM detected ({total_vram/1024/1024/1024:.1f}GB), ensuring optimal memory management")
         
         # Try to get and log the current model management settings
         response = requests.get(f"http://{COMFY_HOST}/object_info", timeout=5)
         if response.status_code == 200:
             print(f"worker-comfyui - ComfyUI API available for model caching optimization")
+            
+        # Check if ComfyUI is running in the correct VRAM mode
+        response = requests.get(f"http://{COMFY_HOST}/", timeout=5)
+        if response.status_code == 200:
+            print(f"worker-comfyui - ComfyUI server confirmed running - ready for high VRAM operations")
         
         print(f"worker-comfyui - Model caching configuration completed")
         
@@ -649,11 +702,13 @@ def handler(job):
     errors = []
 
     try:
-        # Establish WebSocket connection
+        # Establish WebSocket connection with longer timeout and proper settings
         ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
         print(f"worker-comfyui - Connecting to websocket: {ws_url}")
         ws = websocket.WebSocket()
-        ws.connect(ws_url, timeout=10)
+        # Set longer timeout and enable keepalive
+        ws.settimeout(30)  # Increased from 10 to 30 seconds
+        ws.connect(ws_url, timeout=30)
         print(f"worker-comfyui - Websocket connected")
 
         # Queue the workflow
@@ -679,40 +734,71 @@ def handler(job):
         # Wait for execution completion via WebSocket
         print(f"worker-comfyui - Waiting for workflow execution ({prompt_id})...")
         execution_done = False
+        progress_timeout_count = 0
+        max_progress_timeouts = 40  # Allow more timeouts before giving up
+        
         while True:
             try:
                 out = ws.recv()
                 if isinstance(out, str):
                     message = json.loads(out)
-                    if message.get("type") == "status":
+                    message_type = message.get("type")
+                    
+                    if message_type == "status":
                         status_data = message.get("data", {}).get("status", {})
-                        print(
-                            f"worker-comfyui - Status update: {status_data.get('exec_info', {}).get('queue_remaining', 'N/A')} items remaining in queue"
-                        )
-                    elif message.get("type") == "executing":
+                        queue_remaining = status_data.get('exec_info', {}).get('queue_remaining', 'N/A')
+                        print(f"worker-comfyui - Status update: {queue_remaining} items remaining in queue")
+                        progress_timeout_count = 0  # Reset timeout counter on status update
+                        
+                    elif message_type == "progress":
                         data = message.get("data", {})
-                        if (
-                            data.get("node") is None
-                            and data.get("prompt_id") == prompt_id
-                        ):
-                            print(
-                                f"worker-comfyui - Execution finished for prompt {prompt_id}"
-                            )
+                        node = data.get("node")
+                        value = data.get("value", 0)
+                        max_value = data.get("max", 100)
+                        progress_pct = (value / max_value * 100) if max_value > 0 else 0
+                        print(f"worker-comfyui - Progress: Node {node} - {value}/{max_value} ({progress_pct:.1f}%)")
+                        progress_timeout_count = 0  # Reset timeout counter on progress update
+                        
+                    elif message_type == "executing":
+                        data = message.get("data", {})
+                        if data.get("node") is None and data.get("prompt_id") == prompt_id:
+                            print(f"worker-comfyui - Execution finished for prompt {prompt_id}")
                             execution_done = True
                             break
-                    elif message.get("type") == "execution_error":
+                        elif data.get("node") is not None:
+                            print(f"worker-comfyui - Executing node: {data.get('node')}")
+                            progress_timeout_count = 0  # Reset timeout counter on node execution
+                            
+                    elif message_type == "execution_error":
                         data = message.get("data", {})
                         if data.get("prompt_id") == prompt_id:
                             error_details = f"Node Type: {data.get('node_type')}, Node ID: {data.get('node_id')}, Message: {data.get('exception_message')}"
-                            print(
-                                f"worker-comfyui - Execution error received: {error_details}"
-                            )
+                            print(f"worker-comfyui - Execution error received: {error_details}")
                             errors.append(f"Workflow execution error: {error_details}")
                             break
+                            
+                    elif message_type == "executed":
+                        data = message.get("data", {})
+                        if data.get("prompt_id") == prompt_id:
+                            node = data.get("node")
+                            print(f"worker-comfyui - Node {node} executed successfully")
+                            progress_timeout_count = 0  # Reset timeout counter on node completion
                 else:
                     continue
+                    
             except websocket.WebSocketTimeoutException:
-                print(f"worker-comfyui - Websocket receive timed out. Still waiting...")
+                progress_timeout_count += 1
+                print(f"worker-comfyui - Websocket receive timed out ({progress_timeout_count}/{max_progress_timeouts}). Still waiting...")
+                
+                # If we've had too many timeouts, check if ComfyUI is still alive
+                if progress_timeout_count >= max_progress_timeouts:
+                    srv_status = _comfy_server_status()
+                    if not srv_status["reachable"]:
+                        raise websocket.WebSocketConnectionClosedException("ComfyUI server became unreachable")
+                    else:
+                        # Reset counter and continue if server is still alive
+                        progress_timeout_count = 0
+                        print(f"worker-comfyui - ComfyUI server still reachable, continuing to wait...")
                 continue
             except websocket.WebSocketConnectionClosedException as closed_err:
                 try:
@@ -770,6 +856,7 @@ def handler(job):
 
         print(f"worker-comfyui - Processing {len(outputs)} output nodes...")
         for node_id, node_output in outputs.items():
+            # Process images
             if "images" in node_output:
                 print(
                     f"worker-comfyui - Node {node_id} contains {len(node_output['images'])} image(s)"
@@ -858,8 +945,98 @@ def handler(job):
                         error_msg = f"Failed to fetch image data for {filename} from /view endpoint."
                         errors.append(error_msg)
 
-            # Check for other output types
-            other_keys = [k for k in node_output.keys() if k != "images"]
+            # Process videos (from VHS_VideoCombine and similar nodes)
+            if "gifs" in node_output:
+                print(
+                    f"worker-comfyui - Node {node_id} contains {len(node_output['gifs'])} video/gif file(s)"
+                )
+                for video_info in node_output["gifs"]:
+                    filename = video_info.get("filename")
+                    subfolder = video_info.get("subfolder", "")
+                    file_type = video_info.get("type", "output")
+
+                    # skip temp files
+                    if file_type == "temp":
+                        print(
+                            f"worker-comfyui - Skipping video {filename} because type is 'temp'"
+                        )
+                        continue
+
+                    if not filename:
+                        warn_msg = f"Skipping video in node {node_id} due to missing filename: {video_info}"
+                        print(f"worker-comfyui - {warn_msg}")
+                        errors.append(warn_msg)
+                        continue
+
+                    video_bytes = get_video_data(filename, subfolder, file_type)
+
+                    if video_bytes:
+                        file_extension = os.path.splitext(filename)[1] or ".mp4"
+
+                        if os.environ.get("BUCKET_ENDPOINT_URL"):
+                            try:
+                                with tempfile.NamedTemporaryFile(
+                                    suffix=file_extension, delete=False
+                                ) as temp_file:
+                                    temp_file.write(video_bytes)
+                                    temp_file_path = temp_file.name
+                                print(
+                                    f"worker-comfyui - Wrote video bytes to temporary file: {temp_file_path}"
+                                )
+
+                                print(f"worker-comfyui - Uploading {filename} to S3...")
+                                s3_url = rp_upload.upload_image(job_id, temp_file_path)  # Note: rp_upload.upload_image works for any file type
+                                os.remove(temp_file_path)  # Clean up temp file
+                                print(
+                                    f"worker-comfyui - Uploaded {filename} to S3: {s3_url}"
+                                )
+                                # Append dictionary with filename and URL
+                                output_data.append(
+                                    {
+                                        "filename": filename,
+                                        "type": "s3_url",
+                                        "data": s3_url,
+                                    }
+                                )
+                            except Exception as e:
+                                error_msg = f"Error uploading {filename} to S3: {e}"
+                                print(f"worker-comfyui - {error_msg}")
+                                errors.append(error_msg)
+                                if "temp_file_path" in locals() and os.path.exists(
+                                    temp_file_path
+                                ):
+                                    try:
+                                        os.remove(temp_file_path)
+                                    except OSError as rm_err:
+                                        print(
+                                            f"worker-comfyui - Error removing temp file {temp_file_path}: {rm_err}"
+                                        )
+                        else:
+                            # Return as base64 string
+                            try:
+                                base64_video = base64.b64encode(video_bytes).decode(
+                                    "utf-8"
+                                )
+                                # Append dictionary with filename and base64 data
+                                output_data.append(
+                                    {
+                                        "filename": filename,
+                                        "type": "base64",
+                                        "data": base64_video,
+                                    }
+                                )
+                                print(f"worker-comfyui - Encoded {filename} as base64")
+                            except Exception as e:
+                                error_msg = f"Error encoding {filename} to base64: {e}"
+                                print(f"worker-comfyui - {error_msg}")
+                                errors.append(error_msg)
+                    else:
+                        error_msg = f"Failed to fetch video data for {filename} from /view endpoint."
+                        errors.append(error_msg)
+
+            # Check for other output types that we don't handle yet
+            handled_keys = {"images", "gifs"}
+            other_keys = [k for k in node_output.keys() if k not in handled_keys]
             if other_keys:
                 warn_msg = (
                     f"Node {node_id} produced unhandled output keys: {other_keys}."
@@ -900,19 +1077,19 @@ def handler(job):
         print(f"worker-comfyui - Job completed with errors/warnings: {errors}")
 
     if not output_data and errors:
-        print(f"worker-comfyui - Job failed with no output images.")
+        print(f"worker-comfyui - Job failed with no output files.")
         return {
             "error": "Job processing failed",
             "details": errors,
         }
     elif not output_data and not errors:
         print(
-            f"worker-comfyui - Job completed successfully, but the workflow produced no images."
+            f"worker-comfyui - Job completed successfully, but the workflow produced no output files."
         )
-        final_result["status"] = "success_no_images"
+        final_result["status"] = "success_no_files"
         final_result["images"] = []
 
-    print(f"worker-comfyui - Job completed. Returning {len(output_data)} image(s).")
+    print(f"worker-comfyui - Job completed. Returning {len(output_data)} file(s).")
     return final_result
 
 

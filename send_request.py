@@ -93,7 +93,7 @@ def send_request(workflow, input_images=None, use_async=False):
         print(f"❌ Request failed: {e}")
         return None
 
-def poll_job_completion(job_id, max_wait_time=600):
+def poll_job_completion(job_id, max_wait_time=1200):
     """Poll for job completion."""
     print(f"Polling for job {job_id} completion...")
     start_time = time.time()
@@ -196,7 +196,8 @@ def normalize_workflow_node_ids(workflow):
         "KSampler": "ksampler_1",
         "VAEDecode": "vae_decode_1",
         "CLIPTextEncode": "clip_text_encode",
-        "SaveAnimatedWEBP": "save_webp_1"
+        "SaveAnimatedWEBP": "save_webp_1",
+        "VHS_VideoCombine": "vhs_videocombine_1"
     }
     
     # Create mapping from old node IDs to new standardized IDs

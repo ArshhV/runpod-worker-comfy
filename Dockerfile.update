@@ -1,5 +1,5 @@
 # Start from the no-models base image
-FROM araiv4/runpod-worker-comfy:no-models-updated
+FROM araiv4/runpod-worker-comfy:comfyui3
 
 # PyTorch and temp directory environment variables to prevent temp directory errors
 ENV TMPDIR=/comfyui/temp
@@ -19,6 +19,70 @@ RUN mkdir -p /comfyui/temp && chmod 755 /comfyui/temp
 RUN mkdir -p /tmp /var/tmp /usr/tmp && \
     chmod 1777 /tmp /var/tmp /usr/tmp
 
+# Copy the new snapshot file for ComfyUI restoration
+COPY wanNew_snapshot.json /wanNew_snapshot.json
+
+# Install additional custom nodes from the new snapshot
+# Use the virtual environment for all subsequent commands
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Install comfyui-videohelpersuite (new in wanNew_snapshot.json)
+RUN cd /comfyui && comfy node install comfyui-videohelpersuite
+
+# Install additional Python packages that are new in wanNew_snapshot.json
+RUN uv pip install \
+    alembic==1.16.2 \
+    audioread==3.0.1 \
+    decorator==5.2.1 \
+    greenlet==3.2.3 \
+    imageio==2.37.0 \
+    imageio-ffmpeg==0.6.0 \
+    joblib==1.5.1 \
+    lazy_loader==0.4 \
+    librosa==0.11.0 \
+    llvmlite==0.44.0 \
+    Mako==1.3.10 \
+    mido==1.3.3 \
+    msgpack==1.1.1 \
+    numba==0.61.2 \
+    openunmix==1.3.0 \
+    platformdirs==4.3.8 \
+    pooch==1.8.2 \
+    pydantic-settings==2.10.1 \
+    pygame==2.6.1 \
+    pymunk==6.8.1 \
+    python-dotenv==1.1.1 \
+    scikit-image==0.25.2 \
+    scikit-learn==1.7.0 \
+    soxr==0.5.0.post1 \
+    SQLAlchemy==2.0.41 \
+    threadpoolctl==3.6.0 \
+    tifffile==2025.6.11
+
+# Update existing packages to newer versions from wanNew_snapshot.json
+RUN uv pip install --upgrade \
+    aiohttp==3.12.13 \
+    cachetools==6.1.0 \
+    certifi==2025.6.15 \
+    comfyui-embedded-docs==0.2.3 \
+    comfyui_frontend_package==1.23.4 \
+    comfyui_workflow_templates==0.1.30 \
+    cryptography==45.0.4 \
+    fonttools==4.58.4 \
+    frozenlist==1.7.0 \
+    hf-xet==1.1.5 \
+    huggingface-hub==0.33.1 \
+    multidict==6.6.2 \
+    pydantic==2.11.7 \
+    Pygments==2.19.2 \
+    propcache==0.3.2 \
+    requests==2.32.4 \
+    scipy==1.16.0 \
+    tokenizers==0.21.2 \
+    transformers==4.53.0 \
+    uv==0.7.17 \
+    yarl==1.20.1
+
 # Copy the PyTorch environment setup script
 COPY src/setup_pytorch_env.py /setup_pytorch_env.py
 RUN chmod +x /setup_pytorch_env.py
@@ -27,9 +91,16 @@ RUN chmod +x /setup_pytorch_env.py
 COPY src/download_models.sh /download_models.sh
 RUN chmod +x /download_models.sh
 
+# Copy the snapshot restore script
+COPY src/restore_snapshot.sh /restore_snapshot.sh
+RUN chmod +x /restore_snapshot.sh
+
 # Copy updated start script with enhanced model downloading and logging
 COPY src/start.sh /start.sh
 RUN chmod +x /start.sh
+
+# Restore ComfyUI environment from the new snapshot
+RUN /restore_snapshot.sh
 
 # Copy the updated handler with model caching optimizations
 COPY handler.py /handler.py
@@ -47,6 +118,10 @@ ENV REFRESH_WORKER="false"
 
 # Enhanced logging for model downloads and ComfyUI operations
 ENV COMFY_LOG_LEVEL="DEBUG"
+
+# Force ComfyUI to use high VRAM mode
+ENV COMFYUI_FORCE_HIGH_VRAM=1
+ENV COMFYUI_DISABLE_MEMORY_MANAGEMENT=1
 
 # Environment variables for runtime model downloading with progress tracking
 # These will be set by RunPod serverless environment
